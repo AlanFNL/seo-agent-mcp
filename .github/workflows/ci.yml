@@ -39,11 +39,22 @@ jobs:
       - name: Audit
         run: npm audit --audit-level=moderate
 
-      - name: Verify the packed tarball is runnable
+      # Install the tarball into an empty project rather than extracting it in
+      # place: the tarball ships no node_modules, so a bare `node dist/cli.js`
+      # inside the extract dies on ERR_MODULE_NOT_FOUND for zod. Installing is
+      # also what a user actually does, and it exercises the bin links.
+      - name: Verify the published package installs and runs
         run: |
           npm pack --silent
-          mkdir -p /tmp/install-check && tar -xzf seo-agent-*.tgz -C /tmp/install-check
-          cd /tmp/install-check/package
-          # Smoke-test the shipped entry points against a real site, with no keys set.
-          env -i PATH="$PATH" HOME="$HOME" SEO_AGENT_DATA_DIR=/tmp/packcheck \
-            node dist/cli.js seo_crawl_site --url https://example.com --max_pages 2 --quiet
+          TARBALL="$PWD/$(ls seo-agent-*.tgz)"
+          mkdir -p /tmp/install-check && cd /tmp/install-check
+          npm init -y >/dev/null
+          npm install --silent "$TARBALL"
+          test -x node_modules/.bin/seo-agent
+          test -x node_modules/.bin/seo-agent-mcp
+          # Smoke-test the shipped entry point against a real site with a
+          # scrubbed environment: no keys, and spend frozen at zero.
+          env -i PATH="$PATH" HOME="$HOME" \
+            SEO_AGENT_DATA_DIR=/tmp/install-check/data SEO_AGENT_BUDGET=0 \
+            ./node_modules/.bin/seo-agent seo_crawl_site \
+              --url https://example.com --max_pages 2 --quiet
