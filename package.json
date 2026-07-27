@@ -3,6 +3,25 @@
   "version": "0.1.0",
   "description": "An Ahrefs/Semrush-class SEO platform built for AI agents, not humans. Exposed as an MCP server.",
   "license": "MIT",
+  "author": "AlanFNL",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/AlanFNL/seo-agent-mcp.git"
+  },
+  "homepage": "https://github.com/AlanFNL/seo-agent-mcp#readme",
+  "bugs": {
+    "url": "https://github.com/AlanFNL/seo-agent-mcp/issues"
+  },
+  "keywords": [
+    "mcp",
+    "model-context-protocol",
+    "seo",
+    "agent",
+    "search-console",
+    "site-audit",
+    "keyword-research",
+    "programmatic-seo"
+  ],
   "type": "module",
   "engines": {
     "node": ">=22.5.0"
