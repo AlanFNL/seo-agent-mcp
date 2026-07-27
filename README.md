@@ -1,5 +1,9 @@
 # seo-agent
 
+[![CI](https://github.com/AlanFNL/seo-agent-mcp/actions/workflows/ci.yml/badge.svg)](https://github.com/AlanFNL/seo-agent-mcp/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+[![Node](https://img.shields.io/badge/node-%3E%3D22.5-brightgreen.svg)](https://nodejs.org)
+
 An Ahrefs/Semrush-class SEO platform built for **agents**, not people. No dashboard, no charts, no login — 36 MCP tools that return decisions instead of tables.
 
 **28 of the 36 tools are free**, and free is the intended way to run this. Set `SEO_AGENT_BUDGET=0` and no metered call can be made at all.
