@@ -48,6 +48,43 @@ export const gscSitesTool = defineTool({
   },
 });
 
+/**
+ * Explain an empty Search Console result.
+ *
+ * "0 clicks, 0 impressions" reads exactly like "this site has no search
+ * presence", when it is far more often a window that predates the site's
+ * indexing, a filter that excluded everything, or the 2-3 day reporting lag.
+ * Returning it bare is the same confident-empty-success failure as
+ * seo_rank_check reporting "ranks for 0 of 0 keywords" with no provider.
+ *
+ * Measured on a real property: the last 28 days returned nothing while a
+ * 480-day window held 589 impressions across 19 queries.
+ */
+export function emptyResultWarnings(o: {
+  fetched: number;
+  kept: number;
+  site: string;
+  startDate: string;
+  endDate: string;
+  minImpressions: number;
+}): string[] {
+  if (o.fetched === 0) {
+    return [
+      `Search Console returned no rows for ${o.site} between ${o.startDate} and ${o.endDate}. ` +
+        'This is not the same as ranking for nothing: the property may not have been verified or indexed ' +
+        'during that window, or the range may be too recent (Search Console lags 2-3 days). ' +
+        'Widen the range with a larger `days` before concluding anything — an older window often has data.',
+    ];
+  }
+  if (o.kept === 0) {
+    return [
+      `All ${o.fetched} row(s) were removed by min_impressions=${o.minImpressions}. ` +
+        'Lower it to see the data that exists.',
+    ];
+  }
+  return [];
+}
+
 export const gscPerformanceTool = defineTool({
   name: 'seo_gsc_performance',
   title: 'Get real ranking and traffic data',
@@ -99,7 +136,15 @@ export const gscPerformanceTool = defineTool({
 
     const filtered = rows.filter((r) => r.impressions >= args.min_impressions);
 
-    const warnings: string[] = [];
+    const warnings: string[] = emptyResultWarnings({
+      fetched: rows.length,
+      kept: filtered.length,
+      site: args.site_url ?? ctx.cfg.gsc?.siteUrl ?? 'this property',
+      startDate,
+      endDate,
+      minImpressions: args.min_impressions,
+    });
+
     if (args.save_snapshot) {
       if (!args.project) {
         warnings.push('save_snapshot was requested but no `project` was given, so nothing was stored.');

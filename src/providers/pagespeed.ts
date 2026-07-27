@@ -61,7 +61,13 @@ export interface PsiResponse {
         score?: number | null;
         scoreDisplayMode?: string;
         numericValue?: number;
-        details?: { overallSavingsMs?: number };
+        /**
+         * Newer Lighthouse "insight" audits (`*-insight`) report their estimated
+         * saving here, per metric and in milliseconds, instead of in
+         * `details.overallSavingsMs`. Both shapes are live in the v5 API today.
+         */
+        metricSavings?: Record<string, number | undefined>;
+        details?: { type?: string; overallSavingsMs?: number };
       }
     >;
   };
@@ -126,6 +132,34 @@ export async function getPageSpeed(
   return { result: value, cached: wasCached };
 }
 
+type PsiAudit = NonNullable<NonNullable<PsiResponse['lighthouseResult']>['audits']>[string];
+
+/** Metrics in `metricSavings` that are denominated in milliseconds. CLS is a
+ *  unitless layout-shift score and must not be compared against or maxed with them. */
+const MS_SAVINGS_METRICS = ['LCP', 'FCP', 'INP', 'TBT'] as const;
+
+/**
+ * Estimated saving in milliseconds, read from whichever shape the audit uses.
+ *
+ * Classic opportunity audits put it in `details.overallSavingsMs`. The newer
+ * `*-insight` audits report per-metric savings in a top-level `metricSavings`
+ * object instead, so reading only the classic field returned `null` for every
+ * one of them — which also made the sort-by-savings meaningless, since the whole
+ * list tied at 0. Measured live: wikipedia.org's `cache-insight` is worth 250ms
+ * of LCP and was being reported as unknown.
+ *
+ * Returns the largest single-metric saving, which is the honest headline: the
+ * per-metric figures overlap (the same deferred image improves both LCP and FCP),
+ * so summing them would double-count.
+ */
+export function savingsMs(audit: PsiAudit): number | null {
+  if (typeof audit.details?.overallSavingsMs === 'number') return round(audit.details.overallSavingsMs, 0);
+  const ms = audit.metricSavings;
+  if (!ms) return null;
+  const values = MS_SAVINGS_METRICS.map((m) => ms[m]).filter((v): v is number => typeof v === 'number');
+  return values.length > 0 ? round(Math.max(...values), 0) : null;
+}
+
 /**
  * PageSpeed Insights response -> PageSpeedResult.
  * Exported so the field mapping can be tested without a key or a 30s API call.
@@ -157,14 +191,20 @@ export function shapePageSpeedResponse(url: string, strategy: 'mobile' | 'deskto
     };
   }
 
+  // An opportunity has to be something the agent can *act on*. Selecting by
+  // `scoreDisplayMode === 'numeric'` admitted pure diagnostics — `max-potential-fid`
+  // is a measurement of the longest task, not a fix, and telling an agent to
+  // "optimise Max Potential First Input Delay" gives it nothing to do. Select on
+  // the two shapes that carry a remedy instead: classic `details.type ===
+  // 'opportunity'`, and the newer `*-insight` audits identified by `metricSavings`.
   const opportunities = Object.values(audits)
-    .filter((a) => a.scoreDisplayMode === 'numeric' || a.scoreDisplayMode === 'metricSavings')
+    .filter((a) => a.details?.type === 'opportunity' || savingsMs(a) !== null)
     .filter((a) => typeof a.score === 'number' && (a.score as number) < 0.9)
     .map((a) => ({
       id: a.id ?? '',
       title: a.title ?? '',
       description: (a.description ?? '').replace(/\[([^\]]+)\]\([^)]+\)/g, '$1').slice(0, 300),
-      savings_ms: typeof a.details?.overallSavingsMs === 'number' ? round(a.details.overallSavingsMs, 0) : null,
+      savings_ms: savingsMs(a),
     }))
     .filter((o) => o.id && o.title)
     .sort((a, b) => (b.savings_ms ?? 0) - (a.savings_ms ?? 0))
@@ -240,6 +280,46 @@ export function pageSpeedToActions(result: PageSpeedResult): Action[] {
           top_opportunities: result.opportunities.slice(0, 5),
         },
         fix: { type: 'fix_core_web_vitals', to: worst.metric },
+      }),
+    );
+  }
+
+  // Passing Core Web Vitals is not the same as having nothing to do. bbc.com/news
+  // passes on field data while scoring 39/100 in lab with 2.75s of recoverable
+  // JavaScript — and with only the failing-CWV branch above, that returned *zero*
+  // actions alongside a summary reading "Passes the Core Web Vitals assessment".
+  // The agent was left to re-derive the priority from `data.opportunities`, which
+  // is the second reasoning pass this codebase exists to remove.
+  //
+  // Deliberately low priority: there is no ranking harm today, so this is
+  // headroom against traffic growth and slower devices, not a fix.
+  const recoverable = result.opportunities.reduce((sum, o) => sum + (o.savings_ms ?? 0), 0);
+  const poorLabScore = typeof result.performance_score === 'number' && result.performance_score < 50;
+  if (failing.length === 0 && (recoverable >= 1000 || poorLabScore)) {
+    const top = result.opportunities.filter((o) => (o.savings_ms ?? 0) > 0).slice(0, 5);
+    actions.push(
+      action({
+        id: `perf.headroom.${result.url}`,
+        priority: 'low',
+        effort: 'medium',
+        category: 'performance',
+        title: `Reclaim ~${round(recoverable / 1000, 1)}s of load time on ${result.url}`,
+        detail:
+          `Core Web Vitals currently pass${isField ? ' on real-user data' : ''}, so this is not costing rankings today` +
+          (poorLabScore ? `, but the lab performance score is ${result.performance_score}/100` : '') +
+          `. ${top.length > 0 ? `The largest recoverable items are: ${top.map((o) => `${o.title} (~${o.savings_ms}ms)`).join('; ')}.` : 'See the opportunities list in data.'} ` +
+          `${sourceNote}`,
+        target: result.url,
+        // Capped well below the failing-CWV band: passing pages must never
+        // outrank an actual failure in the shared backlog.
+        impact_score: round(clamp(12 + recoverable / 500, 0, 34), 1),
+        evidence: {
+          data_source: isField ? 'field (CrUX)' : 'lab (Lighthouse)',
+          performance_score: result.performance_score,
+          recoverable_ms: recoverable,
+          top_opportunities: top,
+        },
+        ...(top[0] ? { fix: { type: 'fix_core_web_vitals', to: top[0].id } } : {}),
       }),
     );
   }

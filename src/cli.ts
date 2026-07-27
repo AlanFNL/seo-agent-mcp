@@ -264,6 +264,28 @@ async function main(): Promise<number> {
     return 1;
   }
 
+  // Reject unknown flags before running anything.
+  //
+  // zod objects strip unknown keys, so `--dimension date` (the field is
+  // `dimensions`) was silently dropped and the tool ran with its default of
+  // ["query"] — returning a confident, plausible answer to a different question
+  // than the one asked. A near-miss flag name is the easiest mistake to make and
+  // was the only one that failed invisibly.
+  const known = Object.keys(tool.inputSchema);
+  const unknown = Object.keys(parsed.args).filter((k) => !known.includes(k));
+  if (unknown.length > 0) {
+    const lines = unknown.map((u) => {
+      const near = known.filter((k) => k.startsWith(u) || u.startsWith(k) || k.replace(/s$/, '') === u.replace(/s$/, ''));
+      return `  --${u}${near.length > 0 ? `  (did you mean --${near.join(' or --')}?)` : ''}`;
+    });
+    process.stderr.write(
+      `Unknown argument${unknown.length > 1 ? 's' : ''} for ${tool.name}:\n${lines.join('\n')}\n\n` +
+        `Valid arguments: ${known.map((k) => `--${k}`).join(', ')}\n` +
+        `Run \`seo-agent describe ${tool.name}\`.\n`,
+    );
+    return 1;
+  }
+
   const runtime = initRuntime();
   const started = Date.now();
 

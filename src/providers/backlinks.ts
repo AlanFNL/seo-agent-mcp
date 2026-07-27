@@ -100,7 +100,11 @@ export function normalizeOpenPageRankResponse(json: OprResponse): DomainAuthorit
 
 class OpenPageRankProvider implements BacklinksProvider {
   readonly name = 'openpagerank';
-  readonly costPerCall = 1;
+  // Zero billable units: the Open PageRank free tier has a daily quota and no
+  // billing. SEO_AGENT_BUDGET caps money, so charging against it here made
+  // SEO_AGENT_BUDGET=0 — the documented way to stay free — block the free
+  // provider. Calls are still recorded, so `seo_usage` shows the count.
+  readonly costPerCall = 0;
 
   constructor(private readonly apiKey: string) {}
 

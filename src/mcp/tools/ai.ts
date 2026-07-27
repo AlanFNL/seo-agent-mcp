@@ -5,6 +5,16 @@ import { getPageSpeed, pageSpeedToActions } from '../../providers/pagespeed.js';
 import { reserve, record } from '../../core/budget.js';
 
 /**
+ * Billable units per PageSpeed call.
+ *
+ * Zero: the PageSpeed Insights API is free with a daily quota and no billing
+ * attached. SEO_AGENT_BUDGET caps spend, not quota — see the comment on
+ * `configureBudget`, which is explicit that it exists so an agent loop cannot
+ * surprise the user via their credit card. A free key has no card behind it.
+ */
+const PAGESPEED_COST = 0;
+
+/**
  * AI-era visibility and Core Web Vitals.
  *
  * Both of these mirror capabilities Ahrefs and Semrush added in their most
@@ -119,11 +129,15 @@ export const pageSpeedTool = defineTool({
       .describe('Google indexes mobile-first, so mobile is the default and the one that matters for ranking.'),
   },
   async handler(args, ctx) {
-    // Cheap, but it is metered and counted, so it must respect the same cap.
-    // Gated on the key for the same reason as above.
-    if (ctx.cfg.pagespeedKey) reserve(1);
+    // PAGESPEED_API_KEY is free, so this costs 0 billable units and must not be
+    // blocked by SEO_AGENT_BUDGET, which caps *money*. Gating a free tool on a
+    // spend ceiling meant the documented free setup (BUDGET=0) disabled a tool
+    // the user had just configured a free key for. The call is still reserved
+    // and recorded so `seo_usage` reports the call count, and so a future
+    // billable tier would only need the cost constant changed.
+    if (ctx.cfg.pagespeedKey) reserve(PAGESPEED_COST);
     const { result, cached } = await getPageSpeed(ctx.cfg, args.url, args.strategy);
-    if (!cached) record('pagespeed', 'page_speed', 1);
+    if (!cached) record('pagespeed', 'page_speed', PAGESPEED_COST);
 
     const source = result.field_data ? 'field (real users, last 28 days)' : 'lab (single simulated load)';
     const metrics = result.field_data ?? result.lab_data;
@@ -146,7 +160,7 @@ export const pageSpeedTool = defineTool({
             'No Chrome UX Report data for this URL, which usually means it has too little traffic. ' +
               'The metrics below are from a single simulated load and are directional only — Google ranks on field data.',
           ],
-      meta: { source: 'pagespeed-insights', cached, cost: cached ? 0 : 1 },
+      meta: { source: 'pagespeed-insights', cached, cost: cached ? 0 : PAGESPEED_COST },
     };
   },
 });

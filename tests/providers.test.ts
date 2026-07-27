@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import { describeCapabilities, loadConfig, type Config } from '../src/config.js';
+import { emptyResultWarnings } from '../src/mcp/tools/gsc.js';
 import {
   normalizeSerperResponse,
   normalizeSerpApiResponse,
@@ -21,6 +22,7 @@ import {
 import {
   shapePageSpeedResponse,
   pageSpeedToActions,
+  savingsMs,
   CWV_THRESHOLDS,
   type PsiResponse,
 } from '../src/providers/pagespeed.js';
@@ -1054,5 +1056,165 @@ describe('describeCapabilities: backlinks fidelity', () => {
     const cap = backlinksCap({});
     expect(cap.available).toBe(false);
     expect(cap.unlock_with).toContain('OPENPAGERANK_API_KEY');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// PageSpeed: the two savings shapes, and diagnostics that are not opportunities
+// ---------------------------------------------------------------------------
+//
+// Fixtures below are the shapes measured from live v5 responses for
+// wikipedia.org and bbc.com/news. The suite previously covered only the classic
+// `details.overallSavingsMs` form, which is why the insight form went unnoticed:
+// every `*-insight` audit parsed to `savings_ms: null`, so the sort by savings
+// tied at zero, and `max-potential-fid` — a measurement, not a fix — was being
+// reported to agents as an optimisation opportunity.
+
+describe('savingsMs: reads both live shapes', () => {
+  it('prefers the classic details.overallSavingsMs', () => {
+    expect(savingsMs({ details: { type: 'opportunity', overallSavingsMs: 1500.4 } })).toBe(1500);
+  });
+
+  it('falls back to the insight metricSavings object', () => {
+    // wikipedia.org's cache-insight, as returned live.
+    expect(savingsMs({ metricSavings: { LCP: 250, FCP: 0 } })).toBe(250);
+  });
+
+  it('takes the largest single metric rather than summing overlapping ones', () => {
+    // The same deferred image improves both LCP and FCP; summing double-counts.
+    expect(savingsMs({ metricSavings: { LCP: 300, FCP: 200, INP: 50 } })).toBe(300);
+  });
+
+  it('ignores CLS, which is unitless and not milliseconds', () => {
+    expect(savingsMs({ metricSavings: { CLS: 0.25 } })).toBeNull();
+    expect(savingsMs({ metricSavings: { LCP: 120, CLS: 0.25 } })).toBe(120);
+  });
+
+  it('returns null for an audit carrying no savings at all', () => {
+    expect(savingsMs({ id: 'max-potential-fid', score: 0.16, scoreDisplayMode: 'numeric' })).toBeNull();
+  });
+});
+
+describe('shapePageSpeedResponse: opportunity selection', () => {
+  const build = (audits: Record<string, unknown>): PsiResponse => ({
+    lighthouseResult: { categories: { performance: { score: 0.4 } }, audits: audits as never },
+  });
+
+  it('excludes diagnostic metrics that carry no remedy', () => {
+    // max-potential-fid measures the longest task. There is nothing to "apply".
+    const out = shapePageSpeedResponse('https://x.test', 'mobile', build({
+      'max-potential-fid': {
+        id: 'max-potential-fid', title: 'Max Potential First Input Delay',
+        score: 0.16, scoreDisplayMode: 'numeric',
+      },
+    }));
+    expect(out.opportunities.map((o) => o.id)).not.toContain('max-potential-fid');
+    expect(out.opportunities).toEqual([]);
+  });
+
+  it('includes insight audits and populates their savings', () => {
+    const out = shapePageSpeedResponse('https://x.test', 'mobile', build({
+      'cache-insight': {
+        id: 'cache-insight', title: 'Use efficient cache lifetimes', description: 'Cache.',
+        score: 0, scoreDisplayMode: 'metricSavings', metricSavings: { LCP: 250, FCP: 0 },
+        details: { type: 'table' },
+      },
+    }));
+    expect(out.opportunities).toHaveLength(1);
+    expect(out.opportunities[0]?.savings_ms).toBe(250);
+  });
+
+  it('sorts the two shapes against each other by real savings', () => {
+    const out = shapePageSpeedResponse('https://x.test', 'mobile', build({
+      'cache-insight': {
+        id: 'cache-insight', title: 'Cache', score: 0,
+        scoreDisplayMode: 'metricSavings', metricSavings: { LCP: 1950 }, details: { type: 'table' },
+      },
+      'unused-javascript': {
+        id: 'unused-javascript', title: 'Unused JS', score: 0.3,
+        scoreDisplayMode: 'metricSavings', details: { type: 'opportunity', overallSavingsMs: 2750 },
+      },
+    }));
+    // Classic (2750ms) must outrank insight (1950ms); before the fix the insight
+    // audit parsed to null and the ordering was arbitrary.
+    expect(out.opportunities.map((o) => o.id)).toEqual(['unused-javascript', 'cache-insight']);
+  });
+});
+
+describe('pageSpeedToActions: passing CWV is not "nothing to do"', () => {
+  const passing = (opportunities: Array<{ id: string; title: string; description: string; savings_ms: number | null }>, score: number | null) => ({
+    url: 'https://x.test', strategy: 'mobile' as const, performance_score: score,
+    field_data: { lcp: 900, inp: 90, cls: 0.01, fcp: 700, ttfb: 300, overall: 'GOOD' as const },
+    lab_data: { lcp: 900, inp: 90, cls: 0.01, fcp: 700, ttfb: 300 },
+    passes_cwv: true, opportunities, fetched_at: '2026-07-27T00:00:00.000Z',
+  });
+  const opp = (id: string, savings_ms: number | null) => ({ id, title: id, description: '', savings_ms });
+
+  it('raises headroom when a passing page still has seconds to reclaim', () => {
+    // bbc.com/news: passes CWV on field data, lab score 31, ~8.5s recoverable.
+    const actions = pageSpeedToActions(passing([opp('unused-javascript', 3200), opp('cache-insight', 1950)], 31));
+    const a = actions.find((x) => x.id.startsWith('perf.headroom'));
+    expect(a).toBeDefined();
+    expect(a?.priority).toBe('low');
+    expect(a?.title).toMatch(/Reclaim/);
+  });
+
+  it('stays quiet when there is little to reclaim', () => {
+    // wikipedia.org: 450ms recoverable, score 100. Not worth an agent's time.
+    expect(pageSpeedToActions(passing([opp('cache-insight', 300), opp('image-delivery-insight', 150)], 100))).toEqual([]);
+  });
+
+  it('stays quiet on a genuinely fast page', () => {
+    expect(pageSpeedToActions(passing([], 100))).toEqual([]);
+  });
+
+  it('never lets a passing page outrank a failing Core Web Vital', () => {
+    const headroom = pageSpeedToActions(passing([opp('unused-javascript', 9000)], 20))
+      .find((x) => x.id.startsWith('perf.headroom'));
+    const failingResult = {
+      ...passing([opp('unused-javascript', 500)], 20),
+      field_data: { lcp: 5000, inp: 600, cls: 0.4, fcp: 3000, ttfb: 1200, overall: 'POOR' as const },
+      passes_cwv: false,
+    };
+    const failing = pageSpeedToActions(failingResult).find((x) => x.id.startsWith('cwv.'));
+    expect(failing).toBeDefined();
+    expect(headroom!.impact_score).toBeLessThan(failing!.impact_score);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Search Console: an empty window must explain itself
+// ---------------------------------------------------------------------------
+//
+// Measured on a real property: the last 28 days returned zero rows while a
+// 480-day window held 589 impressions across 19 queries. Bare, that reads as
+// "this site ranks for nothing" — a confident false negative on the exact
+// question the tool exists to answer.
+
+describe('emptyResultWarnings', () => {
+  const base = {
+    site: 'sc-domain:example.com',
+    startDate: '2026-06-26',
+    endDate: '2026-07-24',
+    minImpressions: 0,
+  };
+
+  it('explains a genuinely empty window instead of implying zero visibility', () => {
+    const w = emptyResultWarnings({ ...base, fetched: 0, kept: 0 });
+    expect(w).toHaveLength(1);
+    expect(w[0]).toMatch(/not the same as ranking for nothing/);
+    expect(w[0]).toMatch(/2026-06-26/);
+    expect(w[0]).toMatch(/sc-domain:example\.com/);
+  });
+
+  it('blames the filter, not the site, when rows existed but were excluded', () => {
+    const w = emptyResultWarnings({ ...base, fetched: 19, kept: 0, minImpressions: 100 });
+    expect(w).toHaveLength(1);
+    expect(w[0]).toMatch(/min_impressions=100/);
+    expect(w[0]).not.toMatch(/not the same as ranking for nothing/);
+  });
+
+  it('stays silent when there is data to report', () => {
+    expect(emptyResultWarnings({ ...base, fetched: 19, kept: 19 })).toEqual([]);
   });
 });

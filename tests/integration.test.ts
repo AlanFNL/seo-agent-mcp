@@ -550,6 +550,37 @@ describe('CLI argument handling', () => {
     expect(r.stdout).toMatch(/1 competitor/);
   });
 
+  it('rejects an unknown flag instead of silently ignoring it', () => {
+    // zod strips unknown keys, so a mistyped flag used to vanish and the tool ran
+    // with its defaults — a confident, plausible answer to a different question.
+    // Found live: `--dimension date` (the field is `dimensions`) silently
+    // returned query-dimension rows.
+    const r = run(['seo_gsc_performance', '--days', '28', '--dimension', 'date']);
+    expect(r.code).toBe(1);
+    expect(r.stderr).toMatch(/Unknown argument/);
+  });
+
+  it('suggests the correct name for a near-miss flag', () => {
+    const r = run(['seo_gsc_performance', '--dimension', 'date']);
+    expect(r.stderr).toMatch(/did you mean --dimensions\?/);
+  });
+
+  it('lists the valid arguments when a flag is unrecognisable', () => {
+    const r = run(['seo_keyword_ideas', '--seed', 'crm', '--not_a_real_flag', 'x']);
+    expect(r.code).toBe(1);
+    expect(r.stderr).toMatch(/Unknown argument/);
+    expect(r.stderr).toMatch(/--seed/);
+    // No guess should be offered when nothing is close.
+    expect(r.stderr).not.toMatch(/did you mean/);
+  });
+
+  it('still accepts every documented flag for a tool', () => {
+    // Guards against the unknown-flag check rejecting legitimate arguments.
+    const r = run(['seo_project_set', '--name', 'cli-known', '--site', 'https://c.example', '--quiet']);
+    expect(r.stderr).not.toMatch(/Unknown argument/);
+    expect(r.code).toBe(0);
+  });
+
   it('accepts a repeated flag as a multi-element array', () => {
     const r = run([
       'seo_project_set', '--name', 'cli-many', '--site', 'https://b.example',

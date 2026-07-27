@@ -135,7 +135,7 @@ Every error names both the fix and the free fallback, so an unconfigured agent g
 
 - Large result sets are capped inline and spilled to an artifact file, with a path in `meta.artifact`. A 5,000-page crawl never floods the context window.
 - Every provider response is cached with a TTL tuned to how fast the data actually changes. Agents loop; without caching, one reasoning chain can fire the same paid SERP call eleven times.
-- `SEO_AGENT_BUDGET` caps provider spend per session. Once hit, metered tools fail with a clear error instead of quietly running up a bill.
+- `SEO_AGENT_BUDGET` caps provider spend per session. Once hit, metered tools fail with a clear error instead of quietly running up a bill. It caps *money*, not quota — tools backed by a free key (PageSpeed, Open PageRank) cost zero units and keep working at `SEO_AGENT_BUDGET=0`, while genuinely paid ones are refused before the network call.
 
 ### 6. The programmatic-SEO gate
 
@@ -182,6 +182,8 @@ Five more unlock with credentials that cost nothing:
 | Domain authority | `OPENPAGERANK_API_KEY` | `seo_domain_authority` | free tier |
 
 Search Console is the one worth doing first. It is *ground truth* rather than an estimate — Ahrefs and Semrush infer your rankings from a sampled keyword universe, while this is what Google actually recorded, across every query you surface for. It's also what makes `seo_gsc_opportunities` work.
+
+> Both free paths above have been exercised against the live APIs, not just fixture-tested: Search Console (service-account JWT → token exchange → `sites` and `searchAnalytics`) and PageSpeed Insights. The remaining paid providers' live HTTP paths are still unverified — their parsers are written to published docs and covered by fixtures.
 
 > Open PageRank returns authority scores **only**. `seo_backlinks` and `seo_link_gap` need link-level data and stay off; `capabilities` reports this as `~ partial` rather than listing tools that would then fail.
 
@@ -324,7 +326,7 @@ Every tool returns the same envelope:
 
 ```bash
 npm run build       # compile
-npm test            # 427 tests
+npm test            # 446 tests
 npm run typecheck   # strict, noUncheckedIndexedAccess
 ```
 
